@@ -2,7 +2,8 @@ import os
 import requests
 import urllib3
 import time
-import json # <--- NUEVO: Necesario para los botones interactivos
+import json
+import cloudscraper
 from flask import Flask, request
 
 # --- IMPORTACIONES RELATIVAS ---
@@ -71,45 +72,37 @@ def send_photo_with_buttons(chat_id, photo_buf, caption, buttons_dates=None):
     try: requests.post(url, data=data, files=files)
     except Exception as e: print(f"Error foto: {e}")
 
-# --- LÓGICA DE MONITOREO ---
-# --- LÓGICA DE MONITOREO ---
+# --- LÓGICA DE MONITOREO CON CLOUDSCRAPER ---
 def check_website():
     if not TARGET_URL: return "⚠️ Sin URL Configurada"
     
-    # --- CAMBIO IMPORTANTE: CABECERAS REALES DE NAVEGADOR ---
-    # Esto simula ser un usuario real usando Chrome en Windows 10
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'Cache-Control': 'max-age=0'
-    }
+    # Cloudscraper se encarga de fingir ser un navegador Chrome real
+    scraper = cloudscraper.create_scraper(
+        browser={
+            'browser': 'chrome',
+            'platform': 'windows',
+            'desktop': True
+        }
+    )
     
     params = {'nocache': time.time()}
     
     try:
         start = time.time()
-        # Usamos una sesión para gestionar cookies si fuera necesario
-        session = requests.Session()
-        resp = session.get(TARGET_URL, headers=headers, params=params, timeout=15, verify=False)
+        
+        # Usamos scraper.get en lugar de requests.get
+        resp = scraper.get(TARGET_URL, params=params, timeout=15)
         
         lat = round((time.time() - start) * 1000, 0)
         status = resp.status_code
         
-        # Lógica especial para 403: A veces devuelven 403 pero la web funciona para humanos
-        if status == 403:
-            msg_log = "Bloqueo Anti-Bot (403)"
-            res = f"⚠️ ALERTA: La web rechaza al bot (Error 403). El firewall nos ha detectado."
-        elif status == 200:
+        if status == 200:
             msg_log = "Online"
             res = f"✅ Online: {lat}ms"
+        elif status == 403:
+             # Si cloudscraper falla, es un bloqueo muy agresivo
+            msg_log = "Bloqueo Fuerte (403)"
+            res = f"⚠️ ALERTA: Ni Cloudscraper pudo pasar. El firewall es muy estricto."
         else:
             msg_log = f"HTTP {status}"
             res = f"⚠️ Error HTTP {status}"
