@@ -72,21 +72,47 @@ def send_photo_with_buttons(chat_id, photo_buf, caption, buttons_dates=None):
     except Exception as e: print(f"Error foto: {e}")
 
 # --- LÓGICA DE MONITOREO ---
+# --- LÓGICA DE MONITOREO ---
 def check_website():
     if not TARGET_URL: return "⚠️ Sin URL Configurada"
     
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    # --- CAMBIO IMPORTANTE: CABECERAS REALES DE NAVEGADOR ---
+    # Esto simula ser un usuario real usando Chrome en Windows 10
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'max-age=0'
+    }
+    
     params = {'nocache': time.time()}
     
     try:
         start = time.time()
-        # verify=False para evitar errores SSL locales
-        resp = requests.get(TARGET_URL, headers=headers, params=params, timeout=10, verify=False)
+        # Usamos una sesión para gestionar cookies si fuera necesario
+        session = requests.Session()
+        resp = session.get(TARGET_URL, headers=headers, params=params, timeout=15, verify=False)
+        
         lat = round((time.time() - start) * 1000, 0)
         status = resp.status_code
         
-        msg_log = "Online" if status == 200 else f"HTTP {status}"
-        res = f"✅ Online: {lat}ms" if status == 200 else f"⚠️ Error HTTP {status}"
+        # Lógica especial para 403: A veces devuelven 403 pero la web funciona para humanos
+        if status == 403:
+            msg_log = "Bloqueo Anti-Bot (403)"
+            res = f"⚠️ ALERTA: La web rechaza al bot (Error 403). El firewall nos ha detectado."
+        elif status == 200:
+            msg_log = "Online"
+            res = f"✅ Online: {lat}ms"
+        else:
+            msg_log = f"HTTP {status}"
+            res = f"⚠️ Error HTTP {status}"
         
     except Exception as e:
         status = 500
