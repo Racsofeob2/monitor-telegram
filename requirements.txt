@@ -4,3 +4,4 @@ gunicorn
 python-dotenv
 urllib3
 matplotlib
+cloudscraper
