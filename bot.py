@@ -1,6 +1,11 @@
 import os
 import requests
+import urllib3 
 from flask import Flask, request
+
+# --- CONFIGURACIÓN SSL ---
+# Esto silencia la advertencia roja en la consola cuando usamos verify=False
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 
@@ -9,14 +14,20 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 TARGET_URL = os.environ.get('TARGET_URL')
 
-# --- FUNCIÓN: REVISAR LA WEB ---
+# --- FUNCIÓN: REVISAR LA WEB (MODIFICADA) ---
 def check_website():
     if not TARGET_URL:
         return "⚠️ Error: No has configurado la URL en Render."
     
+    # 1. Creamos un "Disfraz" para parecer un navegador Chrome real
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+    
     try:
-        # Petición con espera máxima de 10 seg
-        response = requests.get(TARGET_URL, timeout=10)
+        # 2. Añadimos headers=headers (el disfraz)
+        # 3. Añadimos verify=False (ignorar error de certificado SSL)
+        response = requests.get(TARGET_URL, headers=headers, timeout=10, verify=False)
         
         if response.status_code == 200:
             return f"✅ Todo OK: {TARGET_URL} está ONLINE (Código 200)."
@@ -42,7 +53,10 @@ def send_telegram(chat_id, text, show_button=False):
             "one_time_keyboard": False
         }
         
-    requests.post(url, json=payload)
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print(f"Error enviando a Telegram: {e}")
 
 # --- RUTA 1: AUTOMÁTICA (Para Cron-job.org) ---
 @app.route('/monitor')
