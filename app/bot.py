@@ -53,17 +53,19 @@ def send_photo_with_buttons(chat_id, photo_buf, caption, buttons_dates=None):
     try: requests.post(url, data=data, files=files)
     except Exception as e: print(f"Error foto: {e}")
 
-# --- LÓGICA PRAGMÁTICA (403 = ONLINE) ---
+# --- LÓGICA DE MONITOREO REAL ---
 def check_website():
     if not TARGET_URL: return "⚠️ Sin URL Configurada"
     
-    # Cabeceras estándar
+    # Cabeceras estándar para parecer un navegador normal
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Cache-Control': 'no-cache'
     }
     
     params = {'nocache': time.time()}
+    
+    # Valores por defecto para casos de error total de conexión
     status = 0
     lat = 0
     msg_log = ""
@@ -71,42 +73,52 @@ def check_website():
 
     try:
         start = time.time()
-        # Timeout corto (10s) para máxima eficiencia
+        
+        # Hacemos la petición
+        # verify=False es necesario en Render para evitar errores SSL locales
         resp = requests.get(TARGET_URL, headers=headers, params=params, timeout=10, verify=False)
         
-        lat = round((time.time() - start) * 1000, 0)
+        # --- CÁLCULO INMEDIATO DE LA LATENCIA REAL ---
+        # Calculamos el tiempo justo después de recibir respuesta, sea cual sea el status
+        end = time.time()
+        lat = round((end - start) * 1000, 0)
         status = resp.status_code
         
-        # --- INTERPRETACIÓN INTELIGENTE ---
+        # --- INTERPRETACIÓN DEL RESULTADO ---
         if status == 200:
             msg_log = "Online"
             res = f"✅ Online: {lat}ms"
             
         elif status == 403 or status == 429:
-            # MAGIA: El firewall nos bloquea, PERO el servidor responde.
-            # Por tanto: LA WEB ESTÁ VIVA.
+            # 403: El Firewall responde (Significa que hay conexión y servidor vivo)
             msg_log = "Online (WAF)"
             res = f"🛡️ Online (Protegido): {lat}ms"
             
-            # TRUCO PARA EL GRÁFICO:
-            # Si guardamos un 403, el gráfico se verá rojo? 
-            # Si quieres que el gráfico se vea "sano", en la DB el status importa menos que la latencia.
-            # El código del gráfico usa la latencia.
-            
         elif status >= 500:
+            # Error del servidor (pero medimos cuánto tardó en fallar)
             msg_log = f"Server Error {status}"
-            res = f"🔥 Error Servidor: {status}"
-        else:
-            msg_log = f"HTTP {status}"
-            res = f"⚠️ Estado: {status}"
+            res = f"🔥 Error Servidor: {status} ({lat}ms)"
             
+        else:
+            # Otros códigos (404, 301, etc.)
+            msg_log = f"HTTP {status}"
+            res = f"⚠️ Estado: {status} ({lat}ms)"
+            
+    except requests.exceptions.Timeout:
+        # Solo aquí inventamos la latencia, porque NO hubo respuesta
+        status = 0
+        lat = 10000 # Ponemos 10s para indicar que fue muy lento
+        msg_log = "Timeout"
+        res = "🐢 Timeout: La web tardó más de 10s"
+        
     except Exception as e:
-        status = 500
-        lat = 999
+        # Error de conexión física (DNS, cable desconectado...)
+        status = 0
+        lat = 0
         msg_log = str(e)
         res = f"🚨 Caída/Error: {str(e)}"
 
-    # Guardamos en DB
+    # Guardamos en DB siempre la latencia calculada
     db.insert_log(status, lat, msg_log)
     return res
 
@@ -145,7 +157,7 @@ def webhook():
         if "/start" in text:
             send_text(chat_id, "👋 *Panel Estable:*", buttons=True)
         elif "Comprobar" in text or "/check" in text:
-            send_text(chat_id, "📡 Conectando...")
+            send_text(chat_id, "📡 Midiendo latencia real...")
             send_text(chat_id, check_website(), buttons=True)
         elif "Gráfico" in text or "/history" in text:
              rows = db.get_last_7_days_averages()
@@ -159,4 +171,4 @@ def webhook():
 
 @app.route('/')
 def home():
-    return "Bot Monitor Estable Activo 🛡️"
+    return "Bot Monitor Real Latency Activo 🛡️"
