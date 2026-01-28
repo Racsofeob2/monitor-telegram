@@ -90,7 +90,8 @@ def check_website():
             TARGET_URL, 
             params=params, 
             impersonate="chrome110", 
-            timeout=15
+            timeout=15,
+            verify=False
         )
         
         # Calculamos latencia real
