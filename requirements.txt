@@ -4,3 +4,4 @@ urllib3
 matplotlib
 curl-cffi
 python-dotenv
+requests
