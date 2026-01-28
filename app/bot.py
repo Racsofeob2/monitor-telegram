@@ -1,19 +1,16 @@
 import os
-import requests # Para hablar con Telegram
-import urllib3
 import time
 import json
+import requests # Para la API de Telegram (no para la web objetivo)
 from flask import Flask, request
 
-# --- NUEVO MOTOR: CURL_CFFI (El "Impostor" de Chrome) ---
-from curl_cffi import requests as cffi_requests
+# MOTOR DE NAVEGACIÓN (Bypass TLS)
+from curl_cffi import requests as cffi_requests 
 
-# --- IMPORTACIONES RELATIVAS ---
+# IMPORTACIONES RELATIVAS
 from . import db
 from . import history
 
-# Configuración SSL y Flask
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 app = Flask(__name__)
 
 # --- CONFIGURACIÓN ---
@@ -21,29 +18,27 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 TARGET_URL = os.environ.get('TARGET_URL')
 
-# Inicializamos la DB al arrancar la app
+# VARIABLES DE EVASIÓN (Las que acabas de configurar)
+MY_COOKIE = os.environ.get('WEB_COOKIE', '')
+MY_AGENT = os.environ.get('USER_AGENT', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+
+# Inicializamos DB
 db.init_db()
 
-# --- FUNCIONES DE ENVÍO (Telegram API usa requests normal) ---
-
+# --- FUNCIONES DE TELEGRAM (Sin cambios) ---
 def send_text(chat_id, text, buttons=False):
-    """Envía mensajes de texto con el menú principal inferior."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-    
     if buttons:
         payload["reply_markup"] = {
             "keyboard": [[{"text": "🔍 Comprobar"}, {"text": "📊 Gráfico"}]],
-            "resize_keyboard": True,
-            "one_time_keyboard": False
+            "resize_keyboard": True, "one_time_keyboard": False
         }
     try: requests.post(url, json=payload)
     except Exception as e: print(f"Error texto: {e}")
 
 def send_photo_with_buttons(chat_id, photo_buf, caption, buttons_dates=None):
-    """Envía la foto con botones INLINE."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-    
     reply_markup = {}
     if buttons_dates:
         inline_keyboard = []
@@ -57,25 +52,28 @@ def send_photo_with_buttons(chat_id, photo_buf, caption, buttons_dates=None):
         if row: inline_keyboard.append(row)
         reply_markup = {"inline_keyboard": inline_keyboard}
 
-    data = {
-        'chat_id': chat_id, 
-        'caption': caption, 
-        'reply_markup': json.dumps(reply_markup)
-    }
+    data = {'chat_id': chat_id, 'caption': caption, 'reply_markup': json.dumps(reply_markup)}
     files = {'photo': ('chart.png', photo_buf, 'image/png')}
-    
     try: requests.post(url, data=data, files=files)
     except Exception as e: print(f"Error foto: {e}")
 
-# --- LÓGICA DE MONITOREO REAL (Bypass TLS con Curl-CFFI) ---
+# --- LÓGICA DE MONITOREO (CLONACIÓN DE SESIÓN) ---
 def check_website():
     if not TARGET_URL: return "⚠️ Sin URL Configurada"
     
-    print(f"🔍 Iniciando chequeo REAL de: {TARGET_URL}") # LOG
+    print(f"🔍 Entrando como CLON a: {TARGET_URL}")
     
-    # Truco anti-caché
+    # Construimos las cabeceras exactas de tu navegador
+    headers = {
+        'User-Agent': MY_AGENT,      # Tu Chrome 144
+        'Cookie': MY_COOKIE,         # Tu llave de acceso (cf_clearance)
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+        'Cache-Control': 'no-cache',
+        'Upgrade-Insecure-Requests': '1'
+    }
+    
     params = {'nocache': time.time()}
-    
     status = 0
     lat = 0
     msg_log = ""
@@ -84,44 +82,37 @@ def check_website():
     try:
         start = time.time()
         
-        # USAMOS EL MOTOR IMPERSONATE (Simula ser Chrome 110)
-        # Esto engaña al firewall para que crea que somos un humano
+        # Petición "Impersonate" + Cookies Inyectadas
         resp = cffi_requests.get(
             TARGET_URL, 
             params=params, 
-            impersonate="chrome110", 
-            timeout=15,
-            verify=False
+            headers=headers,         # Aquí va tu identidad
+            impersonate="chrome110", # Huella TLS base
+            timeout=20,              
+            verify=False             # Ignoramos error SSL de Render
         )
         
-        # Calculamos latencia real
         lat = round((time.time() - start) * 1000, 0)
         status = resp.status_code
         
-        # Interpretación de resultados
         if status == 200:
             msg_log = "Online"
-            res = f"✅ Online: {lat}ms"
+            res = f"✅ Online: {lat}ms (Acceso Correcto)"
         elif status == 403:
-            msg_log = "Blocked 403"
-            res = f"⛔ Acceso Denegado (403). La web detectó la IP de Render."
-        elif status == 429:
-            msg_log = "Rate Limit 429"
-            res = f"⚠️ Demasiadas peticiones (429)."
+            msg_log = "Cookie Expired"
+            res = f"⛔ Acceso Denegado (403). La cookie ha caducado o Cloudflare detectó la IP."
         else:
             msg_log = f"HTTP {status}"
-            res = f"⚠️ Error HTTP {status}"
+            res = f"⚠️ Respuesta: Código {status}"
             
     except Exception as e:
-        # Captura errores de conexión (DNS, Timeout real, Caída)
         status = 500
         lat = 999
         msg_log = str(e)
-        res = f"🚨 Error de Conexión: {str(e)}"
+        res = f"🚨 Error Conexión: {str(e)}"
 
-    # Guardar en DB
     db.insert_log(status, lat, msg_log)
-    print(f"💾 Guardado: {res}")
+    print(f"💾 Resultado: {status} - {lat}ms")
     return res
 
 # --- RUTAS ---
@@ -129,58 +120,48 @@ def check_website():
 def monitor():
     res = check_website()
     if "✅" not in res:
-        send_text(TELEGRAM_CHAT_ID, f"🤖 *Alerta Auto:*\n{res}")
+        send_text(TELEGRAM_CHAT_ID, f"🤖 *Alerta:*\n{res}")
     return "OK", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     update = request.get_json()
     
-    # --- CASO 1: CLICK EN BOTÓN (Callback) ---
+    # Callbacks (Botones)
     if "callback_query" in update:
         cb = update["callback_query"]
         chat_id = cb["message"]["chat"]["id"]
         data = cb["data"]
-        
-        try:
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery", 
-                          json={"callback_query_id": cb["id"]})
+        try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery", json={"callback_query_id": cb["id"]})
         except: pass
 
         if data.startswith("ver_"):
-            date_target = data.replace("ver_", "")
-            rows = db.get_logs_by_day(date_target)
+            date = data.replace("ver_", "")
+            rows = db.get_logs_by_day(date)
             if rows:
-                img = history.generate_day_graph(rows, date_target)
-                send_photo_with_buttons(chat_id, img, f"🔎 Detalle: {date_target}")
-            else:
-                send_text(chat_id, "⚠️ No hay datos para esa fecha.")
+                img = history.generate_day_graph(rows, date)
+                send_photo_with_buttons(chat_id, img, f"🔎 Detalle: {date}")
+            else: send_text(chat_id, "⚠️ Sin datos.")
 
-    # --- CASO 2: MENSAJE DE TEXTO ---
+    # Mensajes
     elif "message" in update and "text" in update["message"]:
         chat_id = update["message"]["chat"]["id"]
         text = update["message"]["text"]
         
         if "/start" in text:
-            send_text(chat_id, "👋 *Panel de Control V6:*", buttons=True)
-            
+            send_text(chat_id, "👋 *Panel Clon V7:*", buttons=True)
         elif "Comprobar" in text or "/check" in text:
-            send_text(chat_id, "⏳ Accediendo como navegador real...")
+            send_text(chat_id, "🕵️ Usando identidad robada...")
             send_text(chat_id, check_website(), buttons=True)
-            
         elif "Gráfico" in text or "/history" in text:
-            rows = db.get_last_7_days_averages()
-            dates = db.get_available_dates()
-            
-            if rows:
-                send_text(chat_id, "🎨 Generando informe...")
+             rows = db.get_last_7_days_averages()
+             dates = db.get_available_dates()
+             if rows:
                 img = history.generate_global_graph(rows)
-                send_photo_with_buttons(chat_id, img, "📊 Resumen Semanal", buttons_dates=dates)
-            else:
-                send_text(chat_id, "📭 Aún no hay datos suficientes.")
-            
+                send_photo_with_buttons(chat_id, img, "📊 Semanal", buttons_dates=dates)
+             else: send_text(chat_id, "📭 Sin datos.")
+
     return "OK", 200
 
 @app.route('/')
-def home():
-    return "Bot V6 Activo 🚀"
+def home(): return "Bot Clon V7 Activo 🧬"
