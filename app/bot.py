@@ -1,10 +1,12 @@
 import os
-import requests
+import requests # Para hablar con Telegram
 import urllib3
 import time
 import json
-import cloudscraper
 from flask import Flask, request
+
+# --- NUEVO MOTOR: CURL_CFFI (El "Impostor" de Chrome) ---
+from curl_cffi import requests as cffi_requests
 
 # --- IMPORTACIONES RELATIVAS ---
 from . import db
@@ -22,14 +24,13 @@ TARGET_URL = os.environ.get('TARGET_URL')
 # Inicializamos la DB al arrancar la app
 db.init_db()
 
-# --- FUNCIONES DE ENVÍO ---
+# --- FUNCIONES DE ENVÍO (Telegram API usa requests normal) ---
 
 def send_text(chat_id, text, buttons=False):
     """Envía mensajes de texto con el menú principal inferior."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     
-    # Menú fijo inferior (Teclado normal)
     if buttons:
         payload["reply_markup"] = {
             "keyboard": [[{"text": "🔍 Comprobar"}, {"text": "📊 Gráfico"}]],
@@ -40,97 +41,86 @@ def send_text(chat_id, text, buttons=False):
     except Exception as e: print(f"Error texto: {e}")
 
 def send_photo_with_buttons(chat_id, photo_buf, caption, buttons_dates=None):
-    """Envía la foto con botones INLINE (pegados a la imagen) para elegir fecha."""
+    """Envía la foto con botones INLINE."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     
-    # Construcción del teclado interactivo
     reply_markup = {}
     if buttons_dates:
         inline_keyboard = []
         row = []
         for date in buttons_dates:
-            # Callback data es el ID que recibimos cuando hacen click (ej: "ver_2023-10-27")
             btn = {"text": f"📅 {date}", "callback_data": f"ver_{date}"}
             row.append(btn)
-            
-            # Agrupamos botones de 2 en 2 para que se vea ordenado
             if len(row) == 2:
                 inline_keyboard.append(row)
                 row = []
-        
-        if row: inline_keyboard.append(row) # Añadir los que sobren
+        if row: inline_keyboard.append(row)
         reply_markup = {"inline_keyboard": inline_keyboard}
 
-    # Preparamos los datos multipart
     data = {
         'chat_id': chat_id, 
         'caption': caption, 
-        'reply_markup': json.dumps(reply_markup) # Convertimos a JSON texto
+        'reply_markup': json.dumps(reply_markup)
     }
     files = {'photo': ('chart.png', photo_buf, 'image/png')}
     
     try: requests.post(url, data=data, files=files)
     except Exception as e: print(f"Error foto: {e}")
 
-# --- LÓGICA DE MONITOREO HÍBRIDA (Debug + Fallback) ---
+# --- LÓGICA DE MONITOREO REAL (Bypass TLS con Curl-CFFI) ---
 def check_website():
     if not TARGET_URL: return "⚠️ Sin URL Configurada"
     
-    print(f"🔍 Iniciando chequeo de: {TARGET_URL}") # LOG
+    print(f"🔍 Iniciando chequeo REAL de: {TARGET_URL}") # LOG
     
+    # Truco anti-caché
     params = {'nocache': time.time()}
+    
     status = 0
     lat = 0
     msg_log = ""
     res = ""
-    
-    # INTENTO 1: Usar Cloudscraper (Para saltar 403)
+
     try:
-        print("👉 Intentando con Cloudscraper...") # LOG
-        scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
-        
         start = time.time()
-        resp = scraper.get(TARGET_URL, params=params, timeout=10) # Bajamos timeout a 10s
+        
+        # USAMOS EL MOTOR IMPERSONATE (Simula ser Chrome 110)
+        # Esto engaña al firewall para que crea que somos un humano
+        resp = cffi_requests.get(
+            TARGET_URL, 
+            params=params, 
+            impersonate="chrome110", 
+            timeout=15
+        )
+        
+        # Calculamos latencia real
         lat = round((time.time() - start) * 1000, 0)
         status = resp.status_code
-        print(f"✅ Cloudscraper éxito. Status: {status}") # LOG
-
-    except Exception as e_scraper:
-        print(f"❌ Cloudscraper falló o tardó demasiado: {e_scraper}") # LOG
         
-        # INTENTO 2: Fallback a Requests Normal (Plan B)
-        try:
-            print("👉 Cambiando a Requests normal (Plan B)...") # LOG
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            start = time.time()
-            resp = requests.get(TARGET_URL, headers=headers, params=params, timeout=5, verify=False)
-            lat = round((time.time() - start) * 1000, 0)
-            status = resp.status_code
-            print(f"✅ Requests normal éxito. Status: {status}") # LOG
-        except Exception as e_req:
-            print(f"☠️ Fallo total: {e_req}") # LOG
-            status = 500
-            lat = 999
-            msg_log = f"Crash: {str(e_req)}"
-            res = f"🚨 Error Crítico: {str(e_req)}"
-            # Guardamos fallo y salimos
-            db.insert_log(status, lat, msg_log)
-            return res
-
-    # --- PROCESAR RESULTADO FINAL ---
-    if status == 200:
-        msg_log = "Online"
-        res = f"✅ Online: {lat}ms"
-    elif status == 403:
-        msg_log = "Bloqueo 403"
-        res = f"⚠️ ALERTA: Web Online pero bloquea al bot (403)."
-    else:
-        msg_log = f"HTTP {status}"
-        res = f"⚠️ Error HTTP {status}"
+        # Interpretación de resultados
+        if status == 200:
+            msg_log = "Online"
+            res = f"✅ Online: {lat}ms"
+        elif status == 403:
+            msg_log = "Blocked 403"
+            res = f"⛔ Acceso Denegado (403). La web detectó la IP de Render."
+        elif status == 429:
+            msg_log = "Rate Limit 429"
+            res = f"⚠️ Demasiadas peticiones (429)."
+        else:
+            msg_log = f"HTTP {status}"
+            res = f"⚠️ Error HTTP {status}"
+            
+    except Exception as e:
+        # Captura errores de conexión (DNS, Timeout real, Caída)
+        status = 500
+        lat = 999
+        msg_log = str(e)
+        res = f"🚨 Error de Conexión: {str(e)}"
 
     # Guardar en DB
     db.insert_log(status, lat, msg_log)
-    print(f"💾 Guardado en DB: {res}") # LOG
+    print(f"💾 Guardado: {res}")
     return res
 
 # --- RUTAS ---
@@ -138,7 +128,6 @@ def check_website():
 def monitor():
     res = check_website()
     if "✅" not in res:
-        # Usamos send_text simple para alertas automáticas
         send_text(TELEGRAM_CHAT_ID, f"🤖 *Alerta Auto:*\n{res}")
     return "OK", 200
 
@@ -146,61 +135,51 @@ def monitor():
 def webhook():
     update = request.get_json()
     
-    # --- CASO 1: CLICK EN UN BOTÓN DE FECHA (Callback Query) ---
+    # --- CASO 1: CLICK EN BOTÓN (Callback) ---
     if "callback_query" in update:
         cb = update["callback_query"]
         chat_id = cb["message"]["chat"]["id"]
-        data = cb["data"] # Aquí viene ej: "ver_2023-10-27"
+        data = cb["data"]
         
-        # 1. Avisamos a Telegram que recibimos el click (quita el reloj de carga)
         try:
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery", 
                           json={"callback_query_id": cb["id"]})
         except: pass
 
-        # 2. Procesamos la petición de fecha
         if data.startswith("ver_"):
             date_target = data.replace("ver_", "")
-            
-            # Pedimos a DB los datos específicos de ese día
             rows = db.get_logs_by_day(date_target)
-            
             if rows:
-                # Generamos gráfico detallado
                 img = history.generate_day_graph(rows, date_target)
-                send_photo_with_buttons(chat_id, img, f"🔎 Detalle del día: {date_target}")
+                send_photo_with_buttons(chat_id, img, f"🔎 Detalle: {date_target}")
             else:
-                send_text(chat_id, "⚠️ No hay datos registrados para esa fecha.")
+                send_text(chat_id, "⚠️ No hay datos para esa fecha.")
 
-    # --- CASO 2: MENSAJE DE TEXTO NORMAL ---
+    # --- CASO 2: MENSAJE DE TEXTO ---
     elif "message" in update and "text" in update["message"]:
         chat_id = update["message"]["chat"]["id"]
         text = update["message"]["text"]
         
         if "/start" in text:
-            send_text(chat_id, "👋 *Panel de Control:*", buttons=True)
+            send_text(chat_id, "👋 *Panel de Control V6:*", buttons=True)
             
         elif "Comprobar" in text or "/check" in text:
-            send_text(chat_id, "⏳ Midiendo...")
+            send_text(chat_id, "⏳ Accediendo como navegador real...")
             send_text(chat_id, check_website(), buttons=True)
             
         elif "Gráfico" in text or "/history" in text:
-            # 1. Pedimos datos globales (Medias de 7 días)
             rows = db.get_last_7_days_averages()
-            # 2. Pedimos fechas disponibles para pintar botones
             dates = db.get_available_dates()
             
             if rows:
-                send_text(chat_id, "🎨 Generando informe semanal...")
-                # Generamos gráfico global
+                send_text(chat_id, "🎨 Generando informe...")
                 img = history.generate_global_graph(rows)
-                # Enviamos foto + botones de fechas
-                send_photo_with_buttons(chat_id, img, "📊 Resumen Semanal (Media Diaria)", buttons_dates=dates)
+                send_photo_with_buttons(chat_id, img, "📊 Resumen Semanal", buttons_dates=dates)
             else:
-                send_text(chat_id, "📭 Aún no hay datos suficientes para generar estadísticas.")
+                send_text(chat_id, "📭 Aún no hay datos suficientes.")
             
     return "OK", 200
 
 @app.route('/')
 def home():
-    return "Bot Interactivo V5 Activo 🚀"
+    return "Bot V6 Activo 🚀"

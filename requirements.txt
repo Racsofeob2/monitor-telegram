@@ -1,7 +1,6 @@
 flask
-requests
 gunicorn
-python-dotenv
 urllib3
 matplotlib
-cloudscraper
+curl-cffi
+python-dotenv
