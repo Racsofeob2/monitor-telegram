@@ -2,52 +2,73 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import io
-import matplotlib.dates as mdates
-from datetime import datetime
+import numpy as np # (Si no tienes numpy instalado, usamos listas nativas para no obligarte a instalar más cosas)
 
-# Colores estilo "Movistar"
-COLOR_RELLENO = '#FF9900' # Naranja intenso
-COLOR_BORDE = '#CC7A00'   # Naranja más oscuro
-COLOR_GRID = '#E0E0E0'    # Gris muy suave
+# Estilos
+COLOR_RELLENO = '#FF9900'
+COLOR_BORDE = '#CC7A00'
+COLOR_GRID = '#EEEEEE'
 
 def create_chart(dates_list, values_list, title, is_daily_detail=False):
-    """Genera el gráfico naranja genérico."""
     if not dates_list: return None
 
     # Configuración del lienzo
     plt.figure(figsize=(10, 5))
     ax = plt.gca()
 
-    # 1. Dibujamos el ÁREA (Relleno)
-    # alpha=0.6 le da esa transparencia elegante
-    plt.fill_between(dates_list, values_list, color=COLOR_RELLENO, alpha=0.6)
+    # --- LIMPIEZA DE DATOS ---
+    # values_list puede traer 'None' donde hubo errores.
+    # Para matplotlib, 'None' crea un hueco en la línea (perfecto para indicar caída).
     
-    # 2. Dibujamos la LÍNEA superior (Borde)
-    plt.plot(dates_list, values_list, color=COLOR_BORDE, linewidth=2)
+    # 1. Dibujar: Matplotlib maneja los None automáticamente rompiendo la línea
+    # Para el relleno (fill_between), necesitamos convertir None a 0 temporalmente o usar where
+    # Truco: Usamos una lista limpia solo para el fill, pero la plot usa la original con huecos
+    values_for_fill = [v if v is not None else 0 for v in values_list]
+    
+    # Dibujamos el área (suave)
+    plt.fill_between(dates_list, values_for_fill, color=COLOR_RELLENO, alpha=0.5)
+    
+    # Dibujamos la línea (fuerte) con los huecos donde sea None
+    plt.plot(dates_list, values_list, color=COLOR_BORDE, linewidth=2, marker='o', markersize=4)
 
-    # 3. Línea discontinua de promedio (Opcional, como en tu foto)
-    promedio = sum(values_list) / len(values_list)
-    plt.axhline(y=promedio, color='gray', linestyle='--', alpha=0.7, linewidth=1, label=f'Media: {int(promedio)}ms')
+    # 2. CÁLCULO DE MEDIA Y ESCALA (Solo con datos válidos)
+    valid_values = [v for v in values_list if v is not None]
+    
+    if valid_values:
+        # Media real (ignorando errores)
+        promedio = sum(valid_values) / len(valid_values)
+        plt.axhline(y=promedio, color='gray', linestyle='--', alpha=0.7, label=f'Promedio Real: {int(promedio)}ms')
+        plt.legend(frameon=False)
+        
+        # Escala Inteligente (Auto-Zoom)
+        # Ajustamos el techo al máximo valor REAL + 25% de aire
+        max_val = max(valid_values)
+        # Si la latencia es muy baja (ej: 20ms), forzamos mínimo 100ms para que se vea bien
+        plt.ylim(0, max(max_val * 1.25, 100))
+    else:
+        # Si todo son errores, escala por defecto
+        plt.ylim(0, 100)
 
     # Estética
     plt.title(title, fontsize=12, fontweight='bold', pad=15)
     plt.ylabel("Latencia (ms)")
     plt.grid(axis='y', color=COLOR_GRID, linestyle='-', linewidth=0.5)
     
-    # Quitar bordes feos de la caja (arriba y derecha)
+    # Bordes limpios
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    ax.spines['left'].set_color('gray')
-    ax.spines['bottom'].set_color('gray')
+    ax.spines['left'].set_color('#888888')
+    ax.spines['bottom'].set_color('#888888')
 
-    # Limite Y para que se vea bien (si hay error 999, que no aplaste el resto)
-    max_val = max(values_list)
-    if max_val > 900: 
-        plt.ylim(0, 1000) # Si hay errores
-    else:
-        plt.ylim(0, max_val * 1.2) # Margen del 20% arriba
+    # Ajustes del eje X para el detalle diario
+    if is_daily_detail:
+        plt.xticks(rotation=45, ha='right')
+        # Si hay demasiados datos, ocultamos algunas etiquetas para que no se amontonen
+        if len(dates_list) > 10:
+            for index, label in enumerate(ax.xaxis.get_ticklabels()):
+                if index % (len(dates_list) // 8) != 0:
+                    label.set_visible(False)
 
-    plt.legend(frameon=False)
     plt.tight_layout()
 
     buf = io.BytesIO()
@@ -56,37 +77,47 @@ def create_chart(dates_list, values_list, title, is_daily_detail=False):
     plt.close()
     return buf
 
-# --- PUNTO DE ENTRADA GLOBAL ---
+# --- PUNTOS DE ENTRADA ---
+
 def generate_global_graph(data_rows):
-    """Prepara datos para el gráfico de los últimos 7 días."""
+    """Gráfico Semanal."""
     days = []
     avgs = []
     for row in data_rows:
-        # row = ('2023-10-27', 145.5)
-        # Convertimos a formato fecha corta "27 Oct"
-        dt = datetime.strptime(row[0], "%Y-%m-%d")
-        days.append(dt.strftime("%d/%m"))
+        # row = ('2023-01-01', 150.5)
+        # Convertimos fecha a formato corto "01/01"
+        try:
+            from datetime import datetime
+            dt = datetime.strptime(row[0], "%Y-%m-%d")
+            days.append(dt.strftime("%d/%m"))
+        except:
+            days.append(row[0])
         avgs.append(row[1])
     
     return create_chart(days, avgs, "Latencia Media - Últimos 7 Días")
 
-# --- PUNTO DE ENTRADA DIARIO ---
 def generate_day_graph(data_rows, date_str):
-    """Prepara datos para el gráfico detallado de UN día."""
+    """Gráfico Diario (Detalle)."""
     hours = []
     latencies = []
+    
     for row in data_rows:
-        # row = ('2023-10-27 14:30:05', 200, 45.5)
+        # row = ('2023-01-01 14:30:00', status, latency)
         full_date = row[0]
         status = row[1]
         latency = row[2]
         
-        # Extraemos solo la hora HH:MM
-        time_str = full_date.split(" ")[1][:5]
+        # Extraemos hora HH:MM
+        time_str = full_date.split(" ")[1][:5] 
         hours.append(time_str)
         
-        # Si error, ponemos 999
-        if status != 200: latencies.append(999)
-        else: latencies.append(latency)
+        # FILTRO CLAVE:
+        # Solo consideramos latencia válida si el status es bueno (200, 403, 429).
+        # Si es error (500, 0, Timeout), pasamos 'None'.
+        # Esto hace que el gráfico muestre un hueco en vez de bajar a 0.
+        if status in [200, 403, 429]:
+            latencies.append(latency)
+        else:
+            latencies.append(None) # <--- ESTO ARREGLA LA MEDIA Y LA ESCALA
 
     return create_chart(hours, latencies, f"Detalle del día {date_str}", is_daily_detail=True)
