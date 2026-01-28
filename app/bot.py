@@ -72,49 +72,65 @@ def send_photo_with_buttons(chat_id, photo_buf, caption, buttons_dates=None):
     try: requests.post(url, data=data, files=files)
     except Exception as e: print(f"Error foto: {e}")
 
-# --- LÓGICA DE MONITOREO CON CLOUDSCRAPER ---
+# --- LÓGICA DE MONITOREO HÍBRIDA (Debug + Fallback) ---
 def check_website():
     if not TARGET_URL: return "⚠️ Sin URL Configurada"
     
-    # Cloudscraper se encarga de fingir ser un navegador Chrome real
-    scraper = cloudscraper.create_scraper(
-        browser={
-            'browser': 'chrome',
-            'platform': 'windows',
-            'desktop': True
-        }
-    )
+    print(f"🔍 Iniciando chequeo de: {TARGET_URL}") # LOG
     
     params = {'nocache': time.time()}
+    status = 0
+    lat = 0
+    msg_log = ""
+    res = ""
     
+    # INTENTO 1: Usar Cloudscraper (Para saltar 403)
     try:
+        print("👉 Intentando con Cloudscraper...") # LOG
+        scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
+        
         start = time.time()
-        
-        # Usamos scraper.get en lugar de requests.get
-        resp = scraper.get(TARGET_URL, params=params, timeout=15)
-        
+        resp = scraper.get(TARGET_URL, params=params, timeout=10) # Bajamos timeout a 10s
         lat = round((time.time() - start) * 1000, 0)
         status = resp.status_code
+        print(f"✅ Cloudscraper éxito. Status: {status}") # LOG
+
+    except Exception as e_scraper:
+        print(f"❌ Cloudscraper falló o tardó demasiado: {e_scraper}") # LOG
         
-        if status == 200:
-            msg_log = "Online"
-            res = f"✅ Online: {lat}ms"
-        elif status == 403:
-             # Si cloudscraper falla, es un bloqueo muy agresivo
-            msg_log = "Bloqueo Fuerte (403)"
-            res = f"⚠️ ALERTA: Ni Cloudscraper pudo pasar. El firewall es muy estricto."
-        else:
-            msg_log = f"HTTP {status}"
-            res = f"⚠️ Error HTTP {status}"
-        
-    except Exception as e:
-        status = 500
-        lat = 999
-        msg_log = str(e)
-        res = f"🚨 Caída Crítica: {str(e)}"
+        # INTENTO 2: Fallback a Requests Normal (Plan B)
+        try:
+            print("👉 Cambiando a Requests normal (Plan B)...") # LOG
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            start = time.time()
+            resp = requests.get(TARGET_URL, headers=headers, params=params, timeout=5, verify=False)
+            lat = round((time.time() - start) * 1000, 0)
+            status = resp.status_code
+            print(f"✅ Requests normal éxito. Status: {status}") # LOG
+        except Exception as e_req:
+            print(f"☠️ Fallo total: {e_req}") # LOG
+            status = 500
+            lat = 999
+            msg_log = f"Crash: {str(e_req)}"
+            res = f"🚨 Error Crítico: {str(e_req)}"
+            # Guardamos fallo y salimos
+            db.insert_log(status, lat, msg_log)
+            return res
+
+    # --- PROCESAR RESULTADO FINAL ---
+    if status == 200:
+        msg_log = "Online"
+        res = f"✅ Online: {lat}ms"
+    elif status == 403:
+        msg_log = "Bloqueo 403"
+        res = f"⚠️ ALERTA: Web Online pero bloquea al bot (403)."
+    else:
+        msg_log = f"HTTP {status}"
+        res = f"⚠️ Error HTTP {status}"
 
     # Guardar en DB
     db.insert_log(status, lat, msg_log)
+    print(f"💾 Guardado en DB: {res}") # LOG
     return res
 
 # --- RUTAS ---
