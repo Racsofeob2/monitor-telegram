@@ -1,16 +1,16 @@
 import os
+import requests
+import urllib3
 import time
 import json
-import requests # Para Telegram
 from flask import Flask, request
 
-# MOTOR DE NAVEGACIÓN (Bypass TLS)
-from curl_cffi import requests as cffi_requests 
-
-# IMPORTACIONES RELATIVAS
+# --- IMPORTACIONES RELATIVAS ---
 from . import db
 from . import history
 
+# Configuración SSL y Flask
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 app = Flask(__name__)
 
 # --- CONFIGURACIÓN ---
@@ -18,15 +18,10 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 TARGET_URL = os.environ.get('TARGET_URL')
 
-# COOKIE (La leemos de Render)
-MY_COOKIE = os.environ.get('WEB_COOKIE', '')
-
-# USER AGENT FIJO (Sincronizado con Chrome 124 para evitar sospechas)
-FIXED_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-
+# Inicializamos la DB
 db.init_db()
 
-# --- FUNCIONES TELEGRAM ---
+# --- FUNCIONES DE ENVÍO ---
 def send_text(chat_id, text, buttons=False):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
@@ -58,30 +53,14 @@ def send_photo_with_buttons(chat_id, photo_buf, caption, buttons_dates=None):
     try: requests.post(url, data=data, files=files)
     except Exception as e: print(f"Error foto: {e}")
 
-# --- LÓGICA DE MONITOREO (COHERENCIA TOTAL CHROME 124) ---
+# --- LÓGICA PRAGMÁTICA (403 = ONLINE) ---
 def check_website():
     if not TARGET_URL: return "⚠️ Sin URL Configurada"
     
-    print(f"🔍 Chequeo Coherente (Chrome 124) a: {TARGET_URL}")
-    
-    # CABECERAS COMPLETAS DE CHROME 124
-    # Estas cabeceras 'sec-ch-ua' son OBLIGATORIAS hoy en día
+    # Cabeceras estándar
     headers = {
-        'User-Agent': FIXED_AGENT,
-        'Cookie': MY_COOKIE,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-        'Accept-Encoding': 'gzip, deflate, br, zstd',
-        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
-        'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
-        'sec-fetch-dest': 'document',
-        'sec-fetch-mode': 'navigate',
-        'sec-fetch-site': 'none',
-        'sec-fetch-user': '?1',
-        'upgrade-insecure-requests': '1'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Cache-Control': 'no-cache'
     }
     
     params = {'nocache': time.time()}
@@ -92,57 +71,65 @@ def check_website():
 
     try:
         start = time.time()
-        
-        resp = cffi_requests.get(
-            TARGET_URL, 
-            params=params, 
-            headers=headers,         
-            impersonate="chrome124", # Coincide con User-Agent y sec-ch-ua
-            timeout=20,              
-            verify=False             
-        )
+        # Timeout corto (10s) para máxima eficiencia
+        resp = requests.get(TARGET_URL, headers=headers, params=params, timeout=10, verify=False)
         
         lat = round((time.time() - start) * 1000, 0)
         status = resp.status_code
         
+        # --- INTERPRETACIÓN INTELIGENTE ---
         if status == 200:
             msg_log = "Online"
-            res = f"✅ Online: {lat}ms (Acceso Real)"
-        elif status == 403:
-            msg_log = "Blocked 403"
-            # Si sigue fallando, es la IP o la Cookie
-            res = f"⛔ Acceso Denegado (403). Cloudflare rechazó la Cookie/IP."
+            res = f"✅ Online: {lat}ms"
+            
+        elif status == 403 or status == 429:
+            # MAGIA: El firewall nos bloquea, PERO el servidor responde.
+            # Por tanto: LA WEB ESTÁ VIVA.
+            msg_log = "Online (WAF)"
+            res = f"🛡️ Online (Protegido): {lat}ms"
+            
+            # TRUCO PARA EL GRÁFICO:
+            # Si guardamos un 403, el gráfico se verá rojo? 
+            # Si quieres que el gráfico se vea "sano", en la DB el status importa menos que la latencia.
+            # El código del gráfico usa la latencia.
+            
+        elif status >= 500:
+            msg_log = f"Server Error {status}"
+            res = f"🔥 Error Servidor: {status}"
         else:
             msg_log = f"HTTP {status}"
-            res = f"⚠️ Respuesta: Código {status}"
+            res = f"⚠️ Estado: {status}"
             
     except Exception as e:
         status = 500
         lat = 999
         msg_log = str(e)
-        res = f"🚨 Error: {str(e)}"
+        res = f"🚨 Caída/Error: {str(e)}"
 
+    # Guardamos en DB
     db.insert_log(status, lat, msg_log)
-    print(f"💾 Resultado: {status} - {lat}ms")
     return res
 
 # --- RUTAS ---
 @app.route('/monitor')
 def monitor():
     res = check_website()
-    if "✅" not in res:
-        send_text(TELEGRAM_CHAT_ID, f"🤖 *Alerta:*\n{res}")
+    # Solo enviamos alerta automática si NO es Online (ni verde ni escudo)
+    if "✅" not in res and "🛡️" not in res:
+        send_text(TELEGRAM_CHAT_ID, f"🤖 *Alerta Caída:*\n{res}")
     return "OK", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     update = request.get_json()
+    
     if "callback_query" in update:
         cb = update["callback_query"]
         chat_id = cb["message"]["chat"]["id"]
         data = cb["data"]
         try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery", json={"callback_query_id": cb["id"]})
         except: pass
+
         if data.startswith("ver_"):
             date = data.replace("ver_", "")
             rows = db.get_logs_by_day(date)
@@ -154,10 +141,11 @@ def webhook():
     elif "message" in update and "text" in update["message"]:
         chat_id = update["message"]["chat"]["id"]
         text = update["message"]["text"]
+        
         if "/start" in text:
-            send_text(chat_id, "👋 *Panel V8 (Headers Full):*", buttons=True)
+            send_text(chat_id, "👋 *Panel Estable:*", buttons=True)
         elif "Comprobar" in text or "/check" in text:
-            send_text(chat_id, "🕵️ Probando identidad Chrome 124...")
+            send_text(chat_id, "📡 Conectando...")
             send_text(chat_id, check_website(), buttons=True)
         elif "Gráfico" in text or "/history" in text:
              rows = db.get_last_7_days_averages()
@@ -170,4 +158,5 @@ def webhook():
     return "OK", 200
 
 @app.route('/')
-def home(): return "Bot V8 Activo 🧬"
+def home():
+    return "Bot Monitor Estable Activo 🛡️"
