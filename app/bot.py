@@ -1,7 +1,7 @@
 import os
 import time
 import json
-import requests # Para la API de Telegram (no para la web objetivo)
+import requests # Para Telegram
 from flask import Flask, request
 
 # MOTOR DE NAVEGACIÓN (Bypass TLS)
@@ -18,14 +18,15 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 TARGET_URL = os.environ.get('TARGET_URL')
 
-# VARIABLES DE EVASIÓN (Las que acabas de configurar)
+# COOKIE (La leemos de Render)
 MY_COOKIE = os.environ.get('WEB_COOKIE', '')
-MY_AGENT = os.environ.get('USER_AGENT', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
 
-# Inicializamos DB
+# USER AGENT FIJO (Sincronizado con Chrome 124 para evitar sospechas)
+FIXED_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
 db.init_db()
 
-# --- FUNCIONES DE TELEGRAM (Sin cambios) ---
+# --- FUNCIONES TELEGRAM ---
 def send_text(chat_id, text, buttons=False):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
@@ -57,20 +58,30 @@ def send_photo_with_buttons(chat_id, photo_buf, caption, buttons_dates=None):
     try: requests.post(url, data=data, files=files)
     except Exception as e: print(f"Error foto: {e}")
 
-# --- LÓGICA DE MONITOREO (CLONACIÓN DE SESIÓN) ---
+# --- LÓGICA DE MONITOREO (COHERENCIA TOTAL CHROME 124) ---
 def check_website():
     if not TARGET_URL: return "⚠️ Sin URL Configurada"
     
-    print(f"🔍 Entrando como CLON a: {TARGET_URL}")
+    print(f"🔍 Chequeo Coherente (Chrome 124) a: {TARGET_URL}")
     
-    # Construimos las cabeceras exactas de tu navegador
+    # CABECERAS COMPLETAS DE CHROME 124
+    # Estas cabeceras 'sec-ch-ua' son OBLIGATORIAS hoy en día
     headers = {
-        'User-Agent': MY_AGENT,      # Tu Chrome 144
-        'Cookie': MY_COOKIE,         # Tu llave de acceso (cf_clearance)
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'User-Agent': FIXED_AGENT,
+        'Cookie': MY_COOKIE,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br, zstd',
         'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
         'Cache-Control': 'no-cache',
-        'Upgrade-Insecure-Requests': '1'
+        'Pragma': 'no-cache',
+        'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'sec-fetch-dest': 'document',
+        'sec-fetch-mode': 'navigate',
+        'sec-fetch-site': 'none',
+        'sec-fetch-user': '?1',
+        'upgrade-insecure-requests': '1'
     }
     
     params = {'nocache': time.time()}
@@ -82,14 +93,13 @@ def check_website():
     try:
         start = time.time()
         
-        # Petición "Impersonate" + Cookies Inyectadas
         resp = cffi_requests.get(
             TARGET_URL, 
             params=params, 
-            headers=headers,         # Aquí va tu identidad
-            impersonate="chrome110", # Huella TLS base
+            headers=headers,         
+            impersonate="chrome124", # Coincide con User-Agent y sec-ch-ua
             timeout=20,              
-            verify=False             # Ignoramos error SSL de Render
+            verify=False             
         )
         
         lat = round((time.time() - start) * 1000, 0)
@@ -97,10 +107,11 @@ def check_website():
         
         if status == 200:
             msg_log = "Online"
-            res = f"✅ Online: {lat}ms (Acceso Correcto)"
+            res = f"✅ Online: {lat}ms (Acceso Real)"
         elif status == 403:
-            msg_log = "Cookie Expired"
-            res = f"⛔ Acceso Denegado (403). La cookie ha caducado o Cloudflare detectó la IP."
+            msg_log = "Blocked 403"
+            # Si sigue fallando, es la IP o la Cookie
+            res = f"⛔ Acceso Denegado (403). Cloudflare rechazó la Cookie/IP."
         else:
             msg_log = f"HTTP {status}"
             res = f"⚠️ Respuesta: Código {status}"
@@ -109,7 +120,7 @@ def check_website():
         status = 500
         lat = 999
         msg_log = str(e)
-        res = f"🚨 Error Conexión: {str(e)}"
+        res = f"🚨 Error: {str(e)}"
 
     db.insert_log(status, lat, msg_log)
     print(f"💾 Resultado: {status} - {lat}ms")
@@ -126,15 +137,12 @@ def monitor():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     update = request.get_json()
-    
-    # Callbacks (Botones)
     if "callback_query" in update:
         cb = update["callback_query"]
         chat_id = cb["message"]["chat"]["id"]
         data = cb["data"]
         try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery", json={"callback_query_id": cb["id"]})
         except: pass
-
         if data.startswith("ver_"):
             date = data.replace("ver_", "")
             rows = db.get_logs_by_day(date)
@@ -143,15 +151,13 @@ def webhook():
                 send_photo_with_buttons(chat_id, img, f"🔎 Detalle: {date}")
             else: send_text(chat_id, "⚠️ Sin datos.")
 
-    # Mensajes
     elif "message" in update and "text" in update["message"]:
         chat_id = update["message"]["chat"]["id"]
         text = update["message"]["text"]
-        
         if "/start" in text:
-            send_text(chat_id, "👋 *Panel Clon V7:*", buttons=True)
+            send_text(chat_id, "👋 *Panel V8 (Headers Full):*", buttons=True)
         elif "Comprobar" in text or "/check" in text:
-            send_text(chat_id, "🕵️ Usando identidad robada...")
+            send_text(chat_id, "🕵️ Probando identidad Chrome 124...")
             send_text(chat_id, check_website(), buttons=True)
         elif "Gráfico" in text or "/history" in text:
              rows = db.get_last_7_days_averages()
@@ -164,4 +170,4 @@ def webhook():
     return "OK", 200
 
 @app.route('/')
-def home(): return "Bot Clon V7 Activo 🧬"
+def home(): return "Bot V8 Activo 🧬"
